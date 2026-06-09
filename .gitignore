@@ -1,0 +1,32 @@
+# ========================
+# 1. Dossiers de Données (Très important)
+# ========================
+# On ne met jamais les gros fichiers de données sur GitHub !
+data/
+*.fits
+*.csv
+
+# ========================
+# 2. Fichiers système (macOS)
+# ========================
+.DS_Store
+
+# ========================
+# 3. Environnements virtuels
+# ========================
+# (Ton dossier .venv que l'on a vu dans ton erreur)
+.venv/
+venv/
+env/
+
+# ========================
+# 4. Fichiers de l'éditeur PyCharm
+# ========================
+.idea/
+
+# ========================
+# 5. Fichiers Python et Jupyter
+# ========================
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
