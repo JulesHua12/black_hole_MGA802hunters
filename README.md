@@ -38,5 +38,5 @@ Afin d'assurer une participation équitable et de couvrir tous les requis du cou
 3. Lancer une analyse d'exemple : `python main.py --target KIC_XXXXXXX`
 
 ## 📚 Références et Dépendances
-- [Lightkurve Documentation](https://docs.lightkurve.org/)
+- [[Lightkurve Documentation](https://docs.lightkurve.org/)](https://lightkurve.github.io/lightkurve/)
 - Numpy, Pandas, Matplotlib, Scikit-Learn
