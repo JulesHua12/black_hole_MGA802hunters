@@ -3,9 +3,10 @@
 **Projet de session - MGA 802 : Introduction à la programmation avec Python**
 
 ## Description du projet
-Ce projet est une bibliothèque Python orientée objet conçue pour automatiser le traitement, l'analyse et la classification de courbes de lumière stellaire. Inspiré des méthodes de *Citizen Science*, notre algorithme vise à repérer des anomalies astronomiques (exoplanètes, microlentilles gravitationnelles liées à des trous noirs, et éruptions stellaires) au sein de données brutes issues des télescopes spatiaux tel que le téléscope TESS.
-<img width="6016" height="4016" alt="TESS_alone_high_res (1)" src="https://github.com/user-attachments/assets/7a09a459-5070-4a32-b8d5-50f49f39b129" />
+Ce projet est une bibliothèque Python orientée objet conçue pour automatiser le traitement, l'analyse et la classification de courbes de lumière stellaire. 
 <img width="999" height="691" alt="image" src="https://github.com/user-attachments/assets/5ad33a7c-ec4a-4ebd-8039-eb3aad4ee2f7" />
+Inspiré des méthodes de *Citizen Science*, notre algorithme vise à repérer des anomalies astronomiques (exoplanètes, microlentilles gravitationnelles liées à des trous noirs, et éruptions stellaires) au sein de données brutes issues des télescopes spatiaux tel que le téléscope TESS.
+<img width="6016" height="4016" alt="TESS_alone_high_res (1)" src="https://github.com/user-attachments/assets/7a09a459-5070-4a32-b8d5-50f49f39b129" />
 
 ## Fonctionnalités principales
 - **Extraction automatisée :** Connexion et téléchargement de données réelles via l'API de la NASA (`lightkurve`).
