@@ -28,3 +28,10 @@ classified_results = AnomalyClassifier().classify_all(segments)
 # ─────────────────────────────────────────────
 #plotter = AstroPlotter(raw_data, clean_data, df_flagged, classified_results)
 #plotter.show_results()
+"""
+sphinx :
+You should now populate your master file path\black_hole_MGA802hunters\source\index.rst and create other documentation
+source files. Use the Makefile to build the docs, like so:
+   make builder
+where "builder" is one of the supported builders, e.g. html, latex or linkcheck.
+"""
