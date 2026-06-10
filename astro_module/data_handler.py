@@ -2,12 +2,17 @@ import warnings
 warnings.filterwarnings('ignore') # Masque les avertissements inoffensifs
 import lightkurve as lk
 import pandas as pd
-import numpy as np
+import warnings
+import os
+
+# Hide harmless warnings from the lightkurve library
+warnings.filterwarnings('ignore')
+
 
 class AstroFetcher:
     """
-    Classe responsable de la recherche et du téléchargement des courbes de lumière
-    depuis les archives publiques de la NASA (Kepler/TESS).
+    Class responsible for searching and downloading light curves
+    from public NASA archives (Kepler/TESS).
     """
 
     def __init__(self, target_id):
@@ -15,28 +20,23 @@ class AstroFetcher:
 
     def download_data(self, mission='Kepler'):
         """
-        Cherche et télécharge les données de l'astre ciblé.
+        Searches and downloads the data for the targeted celestial object.
         """
-        print(f"Recherche des données pour l'astre {self.target_id} (Mission: {mission})...")
+        print(f"Searching for data for target {self.target_id} (Mission: {mission})...")
 
-        # Recherche dans les bases de données de la NASA
         search_result = lk.search_lightcurve(self.target_id, mission=mission)
 
         if len(search_result) == 0:
-            raise ValueError(f"Aucune donnée trouvée pour {self.target_id}. Vérifiez l'identifiant.")
+            raise ValueError(f"No data found for {self.target_id}. Please check the ID.")
 
-        print(f"Données trouvées. Téléchargement du premier jeu d'observations...")
-
-        # Téléchargement de la première courbe de lumière disponible
-        raw_lightcurve = search_result[0].download()
-
-        return raw_lightcurve
+        print(f"Data found. Downloading the first available observation set...")
+        return search_result[0].download()
 
 
 class SignalCleaner:
     """
-    Classe responsable du prétraitement (nettoyage, retrait des valeurs aberrantes
-    et gestion des trous d'observation) pour préparer les données pour l'algorithme.
+    Class responsible for preprocessing (cleaning, removing outliers,
+    and handling observation gaps) to prepare the data for the algorithm.
     """
 
     def __init__(self, raw_lightcurve):
@@ -44,24 +44,37 @@ class SignalCleaner:
 
     def process_data(self):
         """
-        Nettoie la courbe de lumière et la convertit en DataFrame Pandas
-        pour faciliter le travail de Machine Learning.
+        Cleans the light curve and converts it into a Pandas DataFrame
+        to facilitate Machine Learning operations.
         """
-        print("Nettoyage des données en cours...")
+        print("🧹 Cleaning data...")
 
-        # 1. Enlever les "trous" (Valeurs manquantes ou NaN)
+        # 1. Remove missing values (NaN)
         clean_lc = self.lc.remove_nans()
 
-        # 2. Lissage et suppression des erreurs de caméra (outliers) extrêmes
-        # flatten() enlève la tendance à long terme de l'étoile
-        # remove_outliers(sigma=5) supprime les points impossibles physiquement
+        # 2. Flatten the curve (remove long-term trend) and remove extreme outliers
         flat_lc = clean_lc.flatten(window_length=401).remove_outliers(sigma=5)
 
-        # 3. Conversion en DataFrame pour faciliter le travail de Jules (IA)
+        # 3. Convert to a Pandas DataFrame
         df = pd.DataFrame({
             'time': flat_lc.time.value,
             'flux': flat_lc.flux.value
         })
 
-        print("Nettoyage terminé. Données prêtes pour l'analyse.")
+        print("Cleaning complete. Data is ready for analysis.")
         return df
+
+    def save_to_csv(self, df, filename="clean_data.csv"):
+        """
+        Saves the Pandas DataFrame to a CSV file on the local machine.
+        """
+        # 1. Ensure the "data/processed" directory exists
+        save_folder = os.path.join("data", "processed")
+        os.makedirs(save_folder, exist_ok=True)
+
+        # 2. Create the full file path
+        full_path = os.path.join(save_folder, filename)
+
+        # 3. Save the dataframe (without the index column)
+        df.to_csv(full_path, index=False)
+        print(f"File successfully saved at: {full_path}")
