@@ -1,16 +1,20 @@
 from astro_module.data_handler import AstroFetcher, SignalCleaner
 
-# 1. On cible l'étoile Kepler-10 (identifiant KIC 11904151)
-fetcher = AstroFetcher("KIC 11904151")
+# 1. Define the target star (Kepler-10)
+target = "KIC 11904151"
 
-# 2. On télécharge la donnée
-donnees_brutes = fetcher.download_data(mission='Kepler')
+# 2. Maxence's job: Fetch the data
+fetcher = AstroFetcher(target)
+raw_data = fetcher.download_data(mission='Kepler')
 
-# 3. On nettoie la donnée
-cleaner = SignalCleaner(donnees_brutes)
-donnees_propres = cleaner.process_data()
+# 3. Maxence's job: Clean the data
+cleaner = SignalCleaner(raw_data)
+clean_data = cleaner.process_data()
 
-# 4. On vérifie que Pandas a bien fait son travail
-print("\nVoici les 5 premières lignes des données prêtes pour l'IA :")
-print(donnees_propres.head())
-print(f"Nombre total de points analysés : {len(donnees_propres)}")
+# 4. Maxence's job: Save the data locally for Jules
+file_name = f"{target}_cleaned.csv"
+cleaner.save_to_csv(clean_data, filename=file_name)
+
+# 5. Quick verification (Sanity check)
+print("\nHere are the first 5 rows of the dataset ready for the AI:")
+print(clean_data.head())
