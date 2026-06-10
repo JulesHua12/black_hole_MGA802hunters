@@ -1,4 +1,4 @@
-from astro_modules.data_handler import AstroFetcher, SignalCleaner
+from astro_module.data_handler import AstroFetcher, SignalCleaner
 
 # 1. On cible l'étoile Kepler-10 (identifiant KIC 11904151)
 fetcher = AstroFetcher("KIC 11904151")
