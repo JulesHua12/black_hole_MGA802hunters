@@ -54,13 +54,24 @@ class AstroPlotter:
         'MICROLENSING': '#27AE60',   # green  — gravitational microlensing
     }
 
+    # Channel-B (baseline-departure) events get their own gold diamond so they
+    # are never confused with the round point-by-point anomaly markers.
+    COLOUR_BASELINE_EVENT = '#F1C40F'   # gold      — diamond marker fill
+    COLOUR_BASELINE_EDGE  = '#7D6608'   # dark gold — diamond edge + label text
+
     def __init__(
         self,
-        df_flagged        : pd.DataFrame,
-        classified_results: list,
-        target_id         : str   = "Unknown Target",
-        sigma_threshold   : float = 3.0,
-        window            : int   = 200,
+        df_flagged          : pd.DataFrame,
+        classified_results  : list,
+        target_id           : str   = "Unknown Target",
+        sigma_threshold     : float = 3.0,
+        window              : int   = 200,
+        baseline_events     : list  = None,
+        show_point_anomalies: bool  = True,
+        show_detection_band : bool  = True,
+        baseline_sigma      : float = None,
+        global_median       : float = None,
+        global_std          : float = None,
     ):
         """
         Store all the data needed to produce the plot.
@@ -68,26 +79,54 @@ class AstroPlotter:
         Parameters
         ----------
         df_flagged : pd.DataFrame
-            Output of AnomalyDetector.detect().
-            Required columns: 'time', 'flux', 'rolling_mean', 'rolling_std', 'is_anomaly'.
+            Output of AnomalyDetector.detect() (and/or detect_baseline_departures).
+            Always needs 'time', 'flux', 'rolling_mean'.  'rolling_std' and
+            'is_anomaly' are only needed when the matching layer is shown.
         classified_results : list[dict]
-            Output of AnomalyClassifier.classify_all() — list of event dicts.
-            Each dict must have: 'event_type', 'confidence', 'anomaly_peak_idx'.
+            The events to annotate.  Each dict must have 'event_type',
+            'confidence' and 'anomaly_peak_idx'.  This is now fed directly by
+            AnomalyDetector.detect_baseline_departures() (transits), but the old
+            AnomalyClassifier.classify_all() output works unchanged too.
         target_id : str
             The star identifier displayed in the figure title (e.g. 'KIC 11904151').
         sigma_threshold : float
-            The σ value used during detection — needed to draw the correct band.
-            Must match the value passed to AnomalyDetector.
+            The local σ used by the point-by-point detector — only used to draw
+            the ±σ band when show_detection_band is True.
         window : int
             The rolling window size used during detection — shown in the legend.
+        baseline_events : list[dict] or None
+            Legacy channel-B input drawn as separate gold diamonds.  Leave None
+            when the transits are already passed via classified_results.
+        show_point_anomalies : bool
+            If True (default, legacy), split the scatter into normal/anomalous
+            using 'is_anomaly' and draw the red markers.  Set False to base the
+            figure purely on the rolling-window (baseline-departure) results.
+        show_detection_band : bool
+            If True (default, legacy), shade the local ±σ point-detection band.
+            Set False when not using the point-by-point detector.
+        baseline_sigma : float or None
+            If given, draw the rolling-window detection envelope:
+            global baseline ± baseline_sigma × global_std.  This is the exact
+            threshold the baseline-departure detector used.
+        global_median, global_std : float or None
+            The global reference used by the baseline-departure detector.  If not
+            supplied they are recomputed from the flux column.
         """
         # self.X = value stores each argument ON the object so that show_results()
         # can access all of them via self.X without needing them passed again.
-        self.df                 = df_flagged
-        self.classified_results = classified_results
-        self.target_id          = target_id
-        self.sigma_threshold    = sigma_threshold
-        self.window             = window
+        self.df                   = df_flagged
+        self.classified_results   = classified_results
+        self.target_id            = target_id
+        self.sigma_threshold      = sigma_threshold
+        self.window               = window
+        self.show_point_anomalies = show_point_anomalies
+        self.show_detection_band  = show_detection_band
+        self.baseline_sigma       = baseline_sigma
+        # Fall back to recomputing the global reference if the caller did not pass it.
+        self.global_median = global_median if global_median is not None else float(df_flagged['flux'].median())
+        self.global_std    = global_std    if global_std    is not None else float(df_flagged['flux'].std())
+        # Default to an empty list so "if self.baseline_events:" is always safe.
+        self.baseline_events    = baseline_events or []
 
     def show_results(self, save_path: str = None):
         """
@@ -118,43 +157,25 @@ class AstroPlotter:
         # dpi=120 → crisp rendering on modern high-resolution screens.
         fig, ax = plt.subplots(figsize=(16, 6), dpi=120)
 
-        # ── 2. Split the data into normal and anomalous cadences ──────────────
-        # Boolean indexing: df[mask] keeps only the rows where mask is True.
-        # ~ is the NOT operator for boolean arrays: ~True = False, ~False = True.
-        df_normal  = self.df[~self.df['is_anomaly']]   # rows where is_anomaly = False
-        df_anomaly = self.df[ self.df['is_anomaly']]   # rows where is_anomaly = True
-
-        # ── 3. Plot normal cadences ───────────────────────────────────────────
-        # ax.scatter() draws individual dots — ideal here because:
-        #   • the telescope samples are not perfectly evenly spaced (observation gaps)
-        #   • connecting thousands of points with lines would create visual noise
-        # Key parameters:
-        #   s     = marker size in points² (small: there are thousands of points)
-        #   alpha = opacity from 0 (invisible) to 1 (fully opaque); 0.5 lets
-        #           overlapping points show through without becoming a solid blob
-        #   zorder = drawing order; lower values are drawn FIRST (behind other elements)
-        ax.scatter(
-            df_normal['time'],    # X axis: observation time in days
-            df_normal['flux'],    # Y axis: normalised flux  (1.0 = typical brightness)
-            color  = self.COLOUR_NORMAL,
-            s      = 2,
-            alpha  = 0.5,
-            zorder = 1,
-            label  = 'Normal cadence',
-        )
-
-        # ── 4. Plot anomalous cadences ────────────────────────────────────────
-        # Same scatter call but with vivid red, larger markers, higher opacity,
-        # and a higher zorder so they appear ON TOP of normal points.
-        ax.scatter(
-            df_anomaly['time'],
-            df_anomaly['flux'],
-            color  = self.COLOUR_ANOMALY,
-            s      = 18,          # larger so they are immediately visible in a dense plot
-            alpha  = 0.95,
-            zorder = 3,
-            label  = 'Detected anomaly',
-        )
+        # ── 2-4. Data scatter (point-anomaly layer is now optional) ───────────
+        # When show_point_anomalies is False, the figure no longer relies on the
+        # point-by-point detector at all: every cadence is drawn in one neutral
+        # colour, and detection is conveyed solely by the rolling-window layer.
+        if self.show_point_anomalies and 'is_anomaly' in self.df.columns:
+            # Legacy behaviour: split normal vs anomalous and highlight in red.
+            df_normal  = self.df[~self.df['is_anomaly']]
+            df_anomaly = self.df[ self.df['is_anomaly']]
+            ax.scatter(df_normal['time'], df_normal['flux'],
+                       color=self.COLOUR_NORMAL, s=2, alpha=0.5, zorder=1,
+                       label='Normal cadence')
+            ax.scatter(df_anomaly['time'], df_anomaly['flux'],
+                       color=self.COLOUR_ANOMALY, s=18, alpha=0.95, zorder=3,
+                       label='Detected anomaly')
+        else:
+            # Rolling-window-only mode: a single neutral cloud of cadences.
+            ax.scatter(self.df['time'], self.df['flux'],
+                       color=self.COLOUR_NORMAL, s=2, alpha=0.5, zorder=1,
+                       label='Cadence')
 
         # ── 5. Rolling-mean baseline ──────────────────────────────────────────
         # ax.plot() draws a continuous line — appropriate for the smooth baseline trend.
@@ -170,72 +191,159 @@ class AstroPlotter:
             label     = f'Rolling mean (window={self.window} pts)',
         )
 
-        # ── 6. Confidence band  (±σ detection envelope) ───────────────────────
-        # ax.fill_between() shades the area between two Y curves at every X value.
-        # Any point OUTSIDE this shaded band was flagged as an anomaly by the detector.
-        upper_band = self.df['rolling_mean'] + self.sigma_threshold * self.df['rolling_std']
-        lower_band = self.df['rolling_mean'] - self.sigma_threshold * self.df['rolling_std']
+        # ── 6a. Local ±σ point-detection band (legacy, optional) ──────────────
+        # This is the envelope of the POINT-BY-POINT detector.  Only shown when
+        # that detector is actually in use.
+        if self.show_detection_band and 'rolling_std' in self.df.columns:
+            upper_band = self.df['rolling_mean'] + self.sigma_threshold * self.df['rolling_std']
+            lower_band = self.df['rolling_mean'] - self.sigma_threshold * self.df['rolling_std']
+            ax.fill_between(
+                self.df['time'], lower_band, upper_band,
+                color=self.COLOUR_BAND, alpha=0.15, zorder=0,
+                label=f'±{self.sigma_threshold}σ detection band',
+            )
 
-        ax.fill_between(
-            self.df['time'],
-            lower_band,
-            upper_band,
-            color  = self.COLOUR_BAND,
-            alpha  = 0.15,        # very transparent — just a hint, does not hide data
-            zorder = 0,           # drawn first, behind everything else
-            label  = f'±{self.sigma_threshold}σ detection band',
-        )
+        # ── 6b. Rolling-window detection envelope (baseline departure) ────────
+        # This is the threshold the baseline-departure detector actually uses:
+        # a transit is flagged when the rolling mean leaves the horizontal band
+        # global_baseline ± baseline_sigma × global_std.  A flat reference line
+        # plus its band makes the criterion legible at a glance.
+        if self.baseline_sigma is not None:
+            hi = self.global_median + self.baseline_sigma * self.global_std
+            lo = self.global_median - self.baseline_sigma * self.global_std
+            ax.axhline(self.global_median, color='#555555', linewidth=0.8,
+                       linestyle=':', alpha=0.7, zorder=0,
+                       label='Global baseline')
+            ax.fill_between(
+                self.df['time'], lo, hi,
+                color=self.COLOUR_BAND, alpha=0.18, zorder=0,
+                label=f'±{self.baseline_sigma}σ baseline envelope',
+            )
 
-        # ── 7. Annotate each classified event ─────────────────────────────────
-        # For each real (non-NOISE) event, add a text label with a pointer arrow
-        # pointing to the most deviant point in the event window.
+        # ── 7. Annotate each detected event ───────────────────────────────────
+        # Events carrying a 'direction' key come from the baseline-departure
+        # detector: the event lives on the ROLLING-MEAN curve, so we mark it there
+        # with a diamond and offset the label in screen pixels (scale-safe).
+        # Legacy classifier events (no 'direction') keep the original behaviour.
+        marked_baseline = False
         for event in self.classified_results:
-            # .loc[row_index] selects ONE row by its integer index and returns
-            # a Pandas Series (like a dictionary of column → value).
             peak_row   = self.df.loc[event['anomaly_peak_idx']]
             peak_time  = peak_row['time']
-            peak_flux  = peak_row['flux']
             event_type = event['event_type']
             confidence = event['confidence']
+            colour     = self.COLOUR_LABELS.get(event_type, self.COLOUR_ANOMALY)
 
-            # Pick the annotation colour for this event type, default to red.
-            colour = self.COLOUR_LABELS.get(event_type, self.COLOUR_ANOMALY)
+            is_baseline = 'direction' in event
+            if is_baseline:
+                # The departure is in the rolling mean → anchor the marker there.
+                peak_y = peak_row['rolling_mean']
+                ax.scatter([peak_time], [peak_y], color=colour, marker='D',
+                           s=70, edgecolors='white', linewidths=1.0, zorder=4,
+                           label=('Transit (baseline departure)'
+                                  if not marked_baseline else None))
+                marked_baseline = True
 
-            # ax.annotate() draws a text label and an optional arrow.
-            # xy       = (x, y) coordinates of the ARROWHEAD (the data point)
-            # xytext   = (x, y) coordinates of the TEXT BOX (offset above the point)
-            # The vertical offset of 0.03 in flux units ≈ 3% brightness — enough
-            # to clear the marker without going off-screen on most real datasets.
-            ax.annotate(
-                f"{event_type}\n({confidence:.0%})",       # label: two lines of text
-                xy         = (peak_time, peak_flux),       # arrowhead at the data point
-                xytext     = (peak_time, peak_flux + 0.03),# text box slightly above
-                fontsize   = 8.5,
-                color      = colour,
-                fontweight = 'bold',
-                ha         = 'center',   # horizontal alignment: centre the text on xytext
-                va         = 'bottom',   # vertical alignment: text sits above xytext
-                arrowprops = dict(
-                    arrowstyle = '->',   # simple arrow with a pointed tip
-                    color      = colour,
-                    lw         = 1.5,    # line width of the arrow shaft
-                ),
-                zorder = 5,   # drawn last, on top of all other elements
+                # Screen-pixel offset: label below a dip, above a bump.
+                dy = -38 if event['direction'] == 'DIP' else 38
+                va = 'top' if event['direction'] == 'DIP' else 'bottom'
+                ax.annotate(
+                    f"{event_type}\n({confidence:.0%})",
+                    xy=(peak_time, peak_y), xytext=(0, dy),
+                    textcoords='offset points',
+                    fontsize=8.5, color=colour, fontweight='bold',
+                    ha='center', va=va,
+                    arrowprops=dict(arrowstyle='->', color=colour, lw=1.5),
+                    zorder=5,
+                )
+            else:
+                # Legacy point-anomaly event: anchor on the flux point.
+                peak_flux = peak_row['flux']
+                ax.annotate(
+                    f"{event_type}\n({confidence:.0%})",
+                    xy=(peak_time, peak_flux),
+                    xytext=(peak_time, peak_flux + 0.03),
+                    fontsize=8.5, color=colour, fontweight='bold',
+                    ha='center', va='bottom',
+                    arrowprops=dict(arrowstyle='->', color=colour, lw=1.5),
+                    zorder=5,
+                )
+
+        # ── 7b. Sustained baseline-departure events (channel B) ───────────────
+        # These broad, shallow events are found by AnomalyDetector
+        # .detect_baseline_departures(): the rolling mean ITSELF drifts far from
+        # the global baseline.  The point-by-point detector (section 4) is blind
+        # to them, so we mark them with a gold diamond placed ON the rolling-mean
+        # curve (that is where the departure lives), with its own annotation.
+        if self.baseline_events:
+            # One scatter call for all diamonds → a single, clean legend entry.
+            be_times = [self.df.loc[ev['peak_idx'], 'time']         for ev in self.baseline_events]
+            be_vals  = [self.df.loc[ev['peak_idx'], 'rolling_mean'] for ev in self.baseline_events]
+            ax.scatter(
+                be_times,
+                be_vals,
+                color      = self.COLOUR_BASELINE_EVENT,
+                marker     = 'D',          # diamond — visually distinct from round dots
+                s          = 70,
+                edgecolors = self.COLOUR_BASELINE_EDGE,
+                linewidths = 1.0,
+                zorder     = 4,
+                label      = 'Baseline-departure event',
             )
+
+            for ev in self.baseline_events:
+                t = self.df.loc[ev['peak_idx'], 'time']
+                v = self.df.loc[ev['peak_idx'], 'rolling_mean']
+
+                # The flux axis spans only ~0.3% here, so a data-unit offset would
+                # throw the label far off-screen.  We offset in SCREEN POINTS
+                # instead (scale-independent): the label sits a fixed ~38 px from
+                # the diamond — BELOW for a dip, ABOVE for a bump — and never
+                # distorts the axis limits.
+                dy = -38 if ev['direction'] == 'DIP' else 38
+                va = 'top' if ev['direction'] == 'DIP' else 'bottom'
+
+                ax.annotate(
+                    f"BASELINE {ev['direction']}\n"
+                    f"{ev['depth_sigma']}σ / {ev['depth_frac'] * 100:.3f}%",
+                    xy         = (t, v),
+                    xytext     = (0, dy),
+                    textcoords = 'offset points',   # offset measured in screen pixels
+                    fontsize   = 8.5,
+                    color      = self.COLOUR_BASELINE_EDGE,
+                    fontweight = 'bold',
+                    ha         = 'center',
+                    va         = va,
+                    arrowprops = dict(
+                        arrowstyle = '->',
+                        color      = self.COLOUR_BASELINE_EVENT,
+                        lw         = 1.5,
+                    ),
+                    zorder = 5,
+                )
 
         # ── 8. Axis labels and title ──────────────────────────────────────────
         # labelpad adds space between the axis line and the label text.
         ax.set_xlabel('Time (days  —  BKJD)', fontsize=12, labelpad=8)
         ax.set_ylabel('Normalised Flux  (1.0 = typical brightness)', fontsize=12, labelpad=8)
 
-        # Multi-line title: first line identifies the target; second line gives
-        # a quick summary of the detection results.
-        n_anomalous = int(self.df['is_anomaly'].sum())
-        n_events    = len(self.classified_results)
+        # Multi-line title: first line identifies the target; second line
+        # summarises the detection.  In rolling-window-only mode we report the
+        # number of transits; in legacy mode we also report point anomalies.
+        n_transits = sum(1 for ev in self.classified_results
+                         if ev.get('event_type') == 'TRANSIT')
+        n_events   = len(self.classified_results)
+        title = f'Automated Transit Detection  —  {self.target_id}\n'
+        if self.show_point_anomalies and 'is_anomaly' in self.df.columns:
+            n_anomalous = int(self.df['is_anomaly'].sum())
+            title += (f'{n_anomalous} anomalous cadence(s) detected   •   '
+                      f'{n_events} event(s) classified')
+        else:
+            title += f'{n_transits} transit(s) detected (rolling-window baseline departure)'
+        # Only mention legacy channel-B diamonds when actually supplied.
+        if self.baseline_events:
+            title += f'   •   {len(self.baseline_events)} baseline-departure event(s)'
         ax.set_title(
-            f'Automated Anomaly Detection  —  {self.target_id}\n'
-            f'{n_anomalous} anomalous cadence(s) detected   •   '
-            f'{n_events} astrophysical event(s) classified',
+            title,
             fontsize   = 13,
             fontweight = 'bold',
             pad        = 14,
@@ -246,15 +354,18 @@ class AstroPlotter:
         # created by the 'label=' arguments in scatter/plot/fill_between above.
         base_handles, base_labels = ax.get_legend_handles_labels()
 
-        # ax.annotate() does NOT create automatic legend entries, so we build
-        # custom Patch objects (coloured rectangles) for each event type.
-        # mpatches.Patch() creates a simple filled rectangle — enough to show
-        # "this colour = this event type" in the legend.
+        # Legacy classifier events (no 'direction') are drawn with annotations
+        # only, so they need a colour patch in the legend.  Baseline transits
+        # already have their own diamond legend entry, so we skip those here and
+        # only add patches for the legacy event types that are actually present.
+        legacy_types  = [ev['event_type'] for ev in self.classified_results
+                         if 'direction' not in ev]
+        present_types = [t for t in self.COLOUR_LABELS if t in legacy_types]
         extra_handles = [
-            mpatches.Patch(facecolor=colour, edgecolor='none', label=etype)
-            for etype, colour in self.COLOUR_LABELS.items()
+            mpatches.Patch(facecolor=self.COLOUR_LABELS[t], edgecolor='none', label=t)
+            for t in present_types
         ]
-        extra_labels = list(self.COLOUR_LABELS.keys())
+        extra_labels = present_types
 
         ax.legend(
             handles    = base_handles + extra_handles,
