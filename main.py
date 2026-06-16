@@ -33,6 +33,7 @@ from astro_module.visualizer    import AstroPlotter
 WINDOW            = 200   # rolling-window size in data points
 BASELINE_SIGMA    = 1.0   # how far (in global σ) the rolling mean must drift to flag a transit
 MIN_DURATION_DAYS = 0.1   # minimum duration of a drift to count (~2.4 h — filters blips)
+TRIM_EDGES_DAYS   = 0.5   # drop the first/last ~12 h of each quarter (thermal-ramp guard)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,9 +87,10 @@ while True:
         fetcher  = AstroFetcher(target_id)
         raw_data = fetcher.download_data(mission='Kepler')
 
-        # SignalCleaner removes NaNs, sigma-clips outliers (5σ), and normalises
-        # the flux around 1.0 so values are comparable across different targets.
-        clean_data = SignalCleaner(raw_data).process_data()
+        # SignalCleaner removes NaNs, clips UPWARD outliers (asymmetric 5σ),
+        # normalises the flux around 1.0, and trims the quarter edges to discard
+        # the start-of-quarter thermal ramp.
+        clean_data = SignalCleaner(raw_data).process_data(trim_edges_days=TRIM_EDGES_DAYS)
 
         # If we reach this line, the download and cleaning both succeeded.
         # 'break' exits the while loop and the pipeline continues below.

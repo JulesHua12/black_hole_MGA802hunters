@@ -167,6 +167,14 @@ class SignalCleaner:
     Instead, we normalise the flux by its median so all values sit near 1.0.
     This keeps the relative depth of transits (~0.1–1% dips) intact while
     still making the signal scale-invariant and comparable across targets.
+
+    IMPORTANT — why our 5σ clipping is ASYMMETRIC:
+    ----------------------------------------------
+    The same reasoning applies to outlier removal.  Cosmic rays and saturation
+    push the flux UP, but transits push it DOWN — and a deep transit can be a
+    −10σ point.  A symmetric ±5σ clip would therefore delete the transit bottoms
+    along with the cosmic rays.  So we clip ONLY the upper side (mean + 5σ /
+    sigma_upper=5) and leave every downward excursion untouched.
     """
 
     def __init__(self, raw_data):
@@ -184,14 +192,47 @@ class SignalCleaner:
         # so each step has a clear, separate responsibility.
         self.data = raw_data
 
-    def process_data(self):
+    def _trim_edges(self, df, trim_edges_days):
+        """
+        Drop every point within `trim_edges_days` of each end of the light curve.
+
+        Why: the start (and end) of a Kepler quarter carries a thermal/focus
+        "ramp".  After the spacecraft repoints (quarter roll, monthly downlink,
+        safe-mode recovery) the optics temperature changes, the telescope focus
+        drifts, and the fraction of starlight falling in the photometric aperture
+        drifts with it — for roughly a day, until the spacecraft thermally
+        settles.  That smooth drift is an INSTRUMENT artefact, not astrophysics,
+        and the baseline-departure detector would otherwise flag it as a false
+        event.  Trimming the unreliable edges removes it at the source.
+        """
+        if not trim_edges_days or trim_edges_days <= 0 or len(df) == 0:
+            return df
+        t = df['time']
+        t0, t1 = t.min(), t.max()
+        before = len(df)
+        df = df[(t >= t0 + trim_edges_days) & (t <= t1 - trim_edges_days)]
+        removed = before - len(df)
+        if removed:
+            print(f"Trimmed {removed} edge point(s) "
+                  f"({trim_edges_days} d at each end — thermal-ramp guard).")
+        return df
+
+    def process_data(self, trim_edges_days: float = 0.0):
         """
         Clean and normalise the light curve regardless of its input format.
 
         Steps applied:
           1. Remove rows with missing values (NaN).
-          2. Remove extreme outliers using the 5-sigma rule.
+          2. Remove UPWARD outliers using the asymmetric 5-sigma rule.
           3. Normalise flux around 1.0 by dividing every value by the median.
+          4. Optionally trim the quarter edges (thermal-ramp guard).
+
+        Parameters
+        ----------
+        trim_edges_days : float
+            If > 0, drop every cadence within this many days of the start and of
+            the end of the light curve, to discard the start-of-quarter thermal
+            ramp.  Default 0.0 keeps the previous behaviour (no trimming).
 
         Returns
         -------
@@ -237,14 +278,15 @@ class SignalCleaner:
             mean_flux = df['flux'].mean()   # arithmetic average of all flux values
             std_flux  = df['flux'].std()    # standard deviation of all flux values
 
-            # Build a boolean mask:
-            #   True  for every row that lies INSIDE the ±5σ band  → keep it
-            #   False for every row outside the band                → discard it
-            # The & operator is element-wise AND: both conditions must be True.
-            df = df[
-                (df['flux'] >= mean_flux - 5 * std_flux) &   # lower bound: mean − 5σ
-                (df['flux'] <= mean_flux + 5 * std_flux)      # upper bound: mean + 5σ
-            ].copy()
+            # ASYMMETRIC 5σ rule — clip UPWARD outliers only.
+            #
+            # Cosmic-ray hits, hot pixels and saturation all push the flux UP, so
+            # we remove anything above mean + 5σ.  But a transit pushes the flux
+            # DOWN, and a deep transit can sit far below mean − 5σ (e.g. a 1% dip
+            # in a star with 0.1% noise is a −10σ point).  A symmetric ±5σ filter
+            # would delete exactly those transit bottoms — the signal we are
+            # hunting — so we deliberately keep the lower side untouched.
+            df = df[df['flux'] <= mean_flux + 5 * std_flux].copy()
             # .copy() creates a fully independent DataFrame.
             # Without it, Pandas may raise a "SettingWithCopyWarning" because
             # modifying a slice of the original can have unpredictable side effects.
@@ -266,6 +308,9 @@ class SignalCleaner:
             median_flux  = df['flux'].median()
             df['flux']   = df['flux'] / (median_flux + 1e-10)
 
+            # Step 4 — Trim the unreliable quarter edges (thermal-ramp guard).
+            df = self._trim_edges(df, trim_edges_days)
+
             print(f"Cleaning complete. ({len(df)} points retained)")
 
             # reset_index(drop=True) renumbers the rows 0, 1, 2, … continuously.
@@ -280,11 +325,16 @@ class SignalCleaner:
 
             # Lightkurve provides convenient built-in methods we can chain:
             #   .remove_nans()          — drops cadences with missing flux values
-            #   .remove_outliers(sigma) — applies the sigma-clipping rule
-            # Chaining means the output of remove_nans() flows directly into
-            # remove_outliers(), saving us an intermediate variable.
-            # NO .flatten() — see the class docstring for the full explanation.
-            clean_lc = self.data.remove_nans().remove_outliers(sigma=5)
+            #   .remove_outliers(...)   — applies the sigma-clipping rule
+            #
+            # ASYMMETRIC clipping (sigma_upper=5, sigma_lower=inf): we remove only
+            # UPWARD outliers (cosmic rays / hot pixels spike up) and keep every
+            # downward excursion.  A symmetric sigma=5 clip would delete the bottom
+            # of deep transits (a 1% dip can be ~10σ) — the exact signal we want.
+            # NO .flatten() either — see the class docstring for the full reason.
+            clean_lc = self.data.remove_nans().remove_outliers(
+                sigma_upper=5, sigma_lower=np.inf
+            )
 
             # Lightkurve stores flux as an AstroPy Quantity object (number + unit).
             # .value strips away the unit and returns a plain NumPy array,
@@ -304,6 +354,9 @@ class SignalCleaner:
                 'time': clean_lc.time.value,
                 'flux': flux_values / (median_flux + 1e-10)  # normalise around 1.0
             })
+
+            # Trim the unreliable quarter edges (thermal-ramp guard).
+            df = self._trim_edges(df, trim_edges_days)
 
             print(f"Cleaning complete. ({len(df)} points retained)")
             return df.reset_index(drop=True)
