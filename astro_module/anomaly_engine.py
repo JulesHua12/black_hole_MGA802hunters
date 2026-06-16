@@ -236,6 +236,182 @@ class AnomalyDetector:
         print(f"{len(result)} anomaly segment(s) extracted.")
         return result
 
+    def detect_baseline_departures(
+        self,
+        baseline_sigma: float = 1.0,
+        min_duration_days: float = 0.1,
+        min_points: int = 50,
+        flag: bool = True,
+    ) -> list[dict]:
+        """
+        Channel B — detect SUSTAINED departures of the rolling baseline itself.
+
+        ── Why this channel exists ──────────────────────────────────────────────
+        The point-by-point detector in detect() compares each cadence to its own
+        LOCAL rolling mean.  This works beautifully for SHORT, SHARP events (a
+        narrow transit, a cosmic-ray spike) because the rolling window is too slow
+        to follow them, so the point sticks out of its local band.
+
+        But it is BLIND to BROAD, shallow events.  When a dip (or bump) lasts
+        LONGER than the rolling window, the rolling mean simply slides down into
+        the event, the ±Nσ band slides down with it, and not a single point ever
+        "sticks out" of its local band.  The event hides itself inside the
+        baseline — the exact same self-erasing effect that SignalCleaner avoids by
+        refusing flatten().  On KIC 11904151 this is why the ~0.04% depression near
+        day 229 is visible in the blue rolling-mean curve yet flagged zero times.
+
+        This channel fixes that by asking a different question: instead of
+        "does this point leave its LOCAL band?", it asks "does the LOCAL baseline
+        leave the GLOBAL baseline?".
+
+            departure(σ_global) = (rolling_mean − global_median) / global_std
+
+        A run of points whose departure stays beyond ±baseline_sigma for at least
+        min_duration_days (and min_points cadences) is reported as a candidate
+        event.  The point requirement also rejects the flat rolling-mean plateaus
+        that appear across observation gaps (few points spanning a long time).
+
+        Parameters
+        ----------
+        baseline_sigma : float
+            How far the rolling mean must drift from the global baseline,
+            measured in GLOBAL standard deviations, to count as a departure.
+            Note: a rolling mean averages `window` points, so its own scatter is
+            ~std/sqrt(window) — tiny (≈0.07σ_global for window=200).  A drift of
+            1.0σ_global is therefore ~14× the baseline's own noise: a very large,
+            highly significant excursion.
+        min_duration_days : float
+            Minimum time span of a departure run to be reported (filters blips).
+        min_points : int
+            Minimum number of cadences in a run (filters gap-straddling artefacts,
+            which span a long time but contain very few real points).
+        flag : bool
+            If True, add a boolean 'is_baseline_anomaly' column to self.df marking
+            the peak cadence of each reported run, so a visualiser can draw it.
+            This is kept SEPARATE from 'is_anomaly' on purpose: channel-B events
+            are broad and must NOT be fed to AnomalyClassifier, which re-normalises
+            inside each segment and is built for narrow events only.
+
+        Returns
+        -------
+        list of dict, each containing:
+            'direction'     : 'DIP' (dimming) or 'BUMP' (brightening)
+            'candidate'     : human-readable guess for the event type
+            'peak_time'     : timestamp (days) of the strongest departure
+            'depth_sigma'   : strongest |departure| in the run, in σ_global
+            'depth_frac'    : same depth expressed as a fraction of the baseline
+            'duration_days' : time span of the run
+            'n_points'      : number of cadences in the run
+            'peak_idx'      : DataFrame row index of the strongest departure
+        """
+        # Channel B needs the rolling baseline.  Compute it on demand if detect()
+        # has not been run yet, so this method is usable standalone.
+        if 'rolling_mean' not in self.df.columns:
+            self.df['rolling_mean'] = (
+                self.df['flux']
+                .rolling(window=self.window, center=True, min_periods=1)
+                .mean()
+            )
+
+        print(
+            f"Running baseline-departure detection "
+            f"(baseline_sigma={baseline_sigma}, min_duration={min_duration_days}d)..."
+        )
+
+        # ── Global reference (robust) ─────────────────────────────────────────
+        # The median is unaffected by the very events we are hunting; the std sets
+        # the natural noise scale of the star against which a drift is "large".
+        global_median = float(self.df['flux'].median())
+        global_std    = float(self.df['flux'].std())
+        if global_std == 0:
+            global_std = 1e-10   # degenerate guard: perfectly flat light curve
+
+        # Expose the detection reference so a visualiser can draw the exact
+        # envelope this method used (global baseline ± baseline_sigma × global_std).
+        self.global_median = global_median
+        self.global_std    = global_std
+        self.baseline_sigma = baseline_sigma
+
+        time = self.df['time'].values
+        rmean = self.df['rolling_mean'].values
+
+        # Signed departure of the local baseline from the global baseline,
+        # expressed in units of the global noise.
+        departure = (rmean - global_median) / global_std
+
+        # Boolean mask: True where the baseline has drifted beyond the threshold.
+        # np.abs() treats dips and bumps symmetrically.
+        mask = np.abs(departure) >= baseline_sigma
+
+        # ── Group consecutive True values into runs ───────────────────────────
+        # np.diff on the integer mask is +1 where a run starts and -1 where it ends.
+        # np.flatnonzero returns the positions of those transitions.
+        m = mask.astype(int)
+        starts = np.flatnonzero(np.diff(np.concatenate(([0], m))) == 1)
+        ends   = np.flatnonzero(np.diff(np.concatenate((m, [0]))) == -1)  # inclusive
+
+        events = []
+        flag_indices = []
+        for s, e in zip(starts, ends):
+            n_pts = e - s + 1
+            span  = float(time[e] - time[s])
+
+            # Reject runs that are too brief or too sparse (gap artefacts).
+            if span < min_duration_days or n_pts < min_points:
+                continue
+
+            # Strongest departure inside the run (where |departure| is largest).
+            run_dep   = departure[s:e + 1]
+            local_pk  = int(np.argmax(np.abs(run_dep)))
+            peak_idx  = s + local_pk
+            depth_sig = float(np.abs(run_dep[local_pk]))
+            signed    = float(run_dep[local_pk])
+
+            direction = 'DIP' if signed < 0 else 'BUMP'
+            # A sustained dimming of the baseline IS the signature of a transit
+            # (planet crossing the stellar disc).  A sustained brightening is not
+            # a transit — we label it separately so it is never mislabelled.
+            event_type = 'TRANSIT' if direction == 'DIP' else 'BRIGHTENING'
+            candidate = (
+                'transit / eclipse candidate' if direction == 'DIP'
+                else 'brightening (microlensing / flare) candidate'
+            )
+
+            # Confidence grows with how far the baseline drifted beyond the
+            # threshold, clamped to [0.4, 0.99] (never absolutely certain).
+            confidence = round(
+                float(np.clip(0.5 + (depth_sig - baseline_sigma) * 0.3, 0.4, 0.99)),
+                2,
+            )
+
+            events.append({
+                'event_type'      : event_type,    # 'TRANSIT' or 'BRIGHTENING'
+                'direction'       : direction,
+                'candidate'       : candidate,
+                'confidence'      : confidence,
+                'peak_time'       : float(time[peak_idx]),
+                'depth_sigma'     : round(depth_sig, 2),
+                'depth_frac'      : round(depth_sig * global_std, 6),
+                'duration_days'   : round(span, 3),
+                'n_points'        : int(n_pts),
+                'peak_idx'        : int(peak_idx),
+                # Alias so the dict is drop-in compatible with the plotter's
+                # event-annotation loop (which reads 'anomaly_peak_idx').
+                'anomaly_peak_idx': int(peak_idx),
+            })
+            flag_indices.append(peak_idx)
+
+        # Optionally mark the peak cadence of each event for plotting.
+        if flag:
+            self.df['is_baseline_anomaly'] = False
+            if flag_indices:
+                self.df.loc[flag_indices, 'is_baseline_anomaly'] = True
+
+        n_transit = sum(1 for ev in events if ev['event_type'] == 'TRANSIT')
+        print(f"{len(events)} baseline-departure event(s) found "
+              f"({n_transit} transit(s)).")
+        return events
+
 
 class AnomalyClassifier:
     """
