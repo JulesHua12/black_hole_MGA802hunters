@@ -103,6 +103,7 @@ while True:
         print("Please try a different identifier.\n")
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  Transit detection  (rolling-window baseline departure)
 # ─────────────────────────────────────────────────────────────────────────────
